@@ -1,0 +1,281 @@
+# ClaraVerse WebUI Docker Compose Configuration
+# Orchestrates all services with proper networking, health checks, and volumes
+
+services:
+  # ============================================================================
+  # Frontend - React application served by Nginx
+  # ============================================================================
+  frontend:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.frontend
+      args:
+        VITE_DEPLOYMENT_MODE: ${VITE_DEPLOYMENT_MODE:-docker}
+        VITE_PYTHON_BACKEND_URL: ${VITE_PYTHON_BACKEND_URL:-/api/python}
+        VITE_SERVER_URL: ${VITE_SERVER_URL:-/api/server}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:3001}
+        VITE_MCP_URL: ${VITE_MCP_URL:-/api/mcp}
+        VITE_CLARA_CORE_URL: ${VITE_CLARA_CORE_URL:-/api/claracore}
+        VITE_OLLAMA_URL: ${VITE_OLLAMA_URL:-/api/ollama}
+        VITE_COMFYUI_URL: ${VITE_COMFYUI_URL:-/api/comfyui}
+        VITE_N8N_URL: ${VITE_N8N_URL:-/api/n8n}
+        VITE_ENABLE_COMMUNITY: ${VITE_ENABLE_COMMUNITY:-false}
+        VITE_ENABLE_EXPERIMENTAL: ${VITE_ENABLE_EXPERIMENTAL:-false}
+        VITE_ENABLE_DEBUG: ${VITE_ENABLE_DEBUG:-false}
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:-}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY:-}
+    image: claraverse/frontend:latest
+    container_name: claraverse-frontend
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    networks:
+      - claraverse-network
+    depends_on:
+      server:
+        condition: service_healthy
+      python-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    labels:
+      com.claraverse.service: "frontend"
+      com.claraverse.description: "React frontend served by Nginx"
+
+  # ============================================================================
+  # Node.js Backend Server - REST API and WebSocket
+  # ============================================================================
+  server:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.server
+    image: claraverse/server:latest
+    container_name: claraverse-server
+    ports:
+      - "${SERVER_PORT:-3000}:3000"
+      - "${SERVER_WS_PORT:-3001}:3001"
+    networks:
+      - claraverse-network
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      WS_PORT: 3001
+      ENABLE_DEBUG: ${ENABLE_DEBUG:-false}
+      CORS_ORIGINS: ${ALLOWED_ORIGINS:-*}
+      CLARA_DATA_DIR: /app/data
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - clara-data:/app/data
+      - server-logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    labels:
+      com.claraverse.service: "server"
+      com.claraverse.description: "Node.js backend server"
+
+  # ============================================================================
+  # Python Backend - TTS/STT/RAG/Document Processing
+  # ============================================================================
+  python-backend:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.python
+    image: claraverse/python-backend:latest
+    container_name: claraverse-python
+    ports:
+      - "${PYTHON_PORT:-5000}:5000"
+    networks:
+      - claraverse-network
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PYTHONUNBUFFERED: 1
+      # Feature flags
+      ENABLE_TTS: ${ENABLE_TTS:-true}
+      ENABLE_STT: ${ENABLE_STT:-true}
+      ENABLE_RAG: ${ENABLE_RAG:-true}
+      ENABLE_DOCUMENT_PROCESSING: ${ENABLE_DOCUMENT_PROCESSING:-true}
+      ENABLE_DIFFUSERS: ${ENABLE_DIFFUSERS:-false}
+    volumes:
+      - python-data:/app/data
+      - python-logs:/app/logs
+      - python-uploads:/app/uploads
+      - rag-storage:/app/rag_storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    labels:
+      com.claraverse.service: "python-backend"
+      com.claraverse.description: "Python backend for AI services"
+
+  # ============================================================================
+  # Clara-Core - Local LLM Inference (llama.cpp)
+  # ============================================================================
+  clara-core:
+    build:
+      context: /home/cinna/src/ClaraCore
+      dockerfile: docker-${CLARA_CORE_ARCH:-cpu}/Dockerfile.${CLARA_CORE_ARCH:-cpu}
+    image: claracore:${CLARA_CORE_ARCH:-cpu}
+    container_name: claraverse-clara-core
+    ports:
+      - "8091:5890"  # Map internal 5890 to external 8091 (expected by ClaraVerse)
+    networks:
+      - claraverse-network
+    volumes:
+      - clara-core-downloads:/app/downloads
+      - clara-core-config:/app/config
+    environment:
+      # Auto-configured based on architecture
+      - OMP_NUM_THREADS=auto
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5890/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    profiles:
+      - claracore
+    labels:
+      com.claraverse.service: "clara-core"
+      com.claraverse.description: "Local LLM inference (llama.cpp)"
+
+  # ============================================================================
+  # PostgreSQL Database (Optional - for future features)
+  # ============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: claraverse-postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - claraverse-network
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-claraverse}
+      POSTGRES_USER: ${POSTGRES_USER:-claraverse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-claraverse}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    profiles:
+      - database
+    labels:
+      com.claraverse.service: "database"
+      com.claraverse.description: "PostgreSQL database"
+
+  # ============================================================================
+  # Redis Cache (Optional - for future features)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: claraverse-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - claraverse-network
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    profiles:
+      - cache
+    labels:
+      com.claraverse.service: "cache"
+      com.claraverse.description: "Redis cache"
+
+# ============================================================================
+# Networks
+# ============================================================================
+networks:
+  claraverse-network:
+    name: claraverse-network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# ============================================================================
+# Volumes for Persistence
+# ============================================================================
+volumes:
+  # Frontend (none needed - static files)
+
+  # Server data
+  clara-data:
+    name: claraverse-clara-data
+    driver: local
+
+  server-logs:
+    name: claraverse-server-logs
+    driver: local
+
+  # Python backend data
+  python-data:
+    name: claraverse-python-data
+    driver: local
+
+  python-logs:
+    name: claraverse-python-logs
+    driver: local
+
+  python-uploads:
+    name: claraverse-python-uploads
+    driver: local
+
+  rag-storage:
+    name: claraverse-rag-storage
+    driver: local
+
+  # Database
+  postgres-data:
+    name: claraverse-postgres-data
+    driver: local
+
+  # Cache
+  redis-data:
+    name: claraverse-redis-data
+    driver: local
+
+  # Clara-Core volumes
+  clara-core-downloads:
+    name: claraverse-clara-core-downloads
+    driver: local
+
+  clara-core-config:
+    name: claraverse-clara-core-config
+    driver: local
