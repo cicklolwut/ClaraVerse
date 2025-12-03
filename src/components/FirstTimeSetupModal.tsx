@@ -286,7 +286,7 @@ const FirstTimeSetupModal: React.FC<FirstTimeSetupModalProps> = ({
               </p>
             </div>
 
-            <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 mb-6">
+            <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 mb-4">
               <h3 className="font-semibold text-blue-900 dark:text-blue-100 mb-2">
                 🚀 Quick 2-Step Setup
               </h3>
@@ -300,6 +300,16 @@ const FirstTimeSetupModal: React.FC<FirstTimeSetupModalProps> = ({
                   <span>Choose your preferred AI workload style</span>
                 </div>
               </div>
+            </div>
+
+            <div className="bg-purple-50 dark:bg-purple-900/20 rounded-lg p-4 mb-6 border border-purple-200 dark:border-purple-700">
+              <h3 className="font-semibold text-purple-900 dark:text-purple-100 mb-1 text-sm flex items-center gap-2">
+                <Info className="w-4 h-4" />
+                Optional: Clara-Core (Local LLM)
+              </h3>
+              <p className="text-xs text-purple-700 dark:text-purple-300">
+                After completing this setup, you can configure Clara-Core for local model inference in Settings → Service Manager. Clara-Core provides Docker-based GPU-accelerated inference.
+              </p>
             </div>
 
             <div className="flex justify-center gap-3">

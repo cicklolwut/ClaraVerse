@@ -14,9 +14,16 @@ import {
   Save,
   Check,
   X,
-  Monitor
+  Monitor,
+  Settings,
+  FileText,
+  Cpu,
+  Gpu
 } from 'lucide-react';
 import { useProviders } from '../../contexts/ProvidersContext';
+import { env } from '../../lib/environment';
+import { ClaraCoreSetupWizard } from '../ClaraCore/ClaraCoreSetupWizard';
+import { ClaraCoreLogsViewer } from '../ClaraCore/ClaraCoreLogsViewer';
 
 // Interfaces for service types
 interface CoreService {
@@ -103,7 +110,7 @@ const UnifiedServiceManager: React.FC = () => {
   });
   const [pythonBackendStatus, setPythonBackendStatus] = useState<ServiceStatus>({
     running: false,
-    serviceUrl: 'http://localhost:5001'
+    serviceUrl: env.pythonBackendUrl
   });
   const [claraCoreStatus, setClaraCoreStatus] = useState<ServiceStatus>({
     running: false,
@@ -121,6 +128,10 @@ const UnifiedServiceManager: React.FC = () => {
   const [claraCoreDockerStatus, setClaraCoreDockerStatus] = useState<any>(null);
   const [claraCoreGPUInfo, setClaraCoreGPUInfo] = useState<any>(null);
   const [detectingGPU, setDetectingGPU] = useState(false);
+
+  // Clara Core Wizard and Logs states
+  const [showClaraCoreWizard, setShowClaraCoreWizard] = useState(false);
+  const [showClaraCoreLogs, setShowClaraCoreLogs] = useState(false);
   
   // Feature Configuration State
   const [featureConfig, setFeatureConfig] = useState({
@@ -474,14 +485,14 @@ const UnifiedServiceManager: React.FC = () => {
       const result = await (window as any).electronAPI.invoke('python-backend:check-service-status');
       setPythonBackendStatus({
         running: result.running || false,
-        serviceUrl: result.serviceUrl || 'http://localhost:5001',
+        serviceUrl: result.serviceUrl || env.pythonBackendUrl,
         error: result.error
       });
     } catch (error) {
       console.error('Error fetching Python Backend status:', error);
       setPythonBackendStatus({
         running: false,
-        serviceUrl: 'http://localhost:5001',
+        serviceUrl: env.pythonBackendUrl,
         error: 'Failed to check status'
       });
     }
@@ -736,6 +747,197 @@ const UnifiedServiceManager: React.FC = () => {
       }
     } catch (error) {
       console.error('Error fetching Clara Core Docker status:', error);
+    }
+  };
+
+  // Handle Clara-Core Setup Wizard Completion
+  const handleClaraCoreSetupComplete = async (config: any) => {
+    console.log('Clara-Core setup completed with config:', config);
+
+    try {
+      setClaraCoreLoading(true);
+
+      // Create container via server API
+      const response = await fetch(`${env.serverUrl}/api/server/clara-core/create`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          architecture: config.architecture,
+          modelsPath: config.modelsPath,
+          port: 8091,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        // Close wizard
+        setShowClaraCoreWizard(false);
+
+        // Refresh status
+        setTimeout(() => fetchClaraCoreStatus(), 2000);
+        setTimeout(() => fetchClaraCoreDockerStatus(), 2000);
+
+        alert('Clara-Core container created successfully! Starting container...');
+      } else {
+        throw new Error(result.error || 'Failed to create container');
+      }
+    } catch (error) {
+      console.error('Failed to complete Clara-Core setup:', error);
+      alert(`Failed to setup Clara-Core: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setClaraCoreLoading(false);
+    }
+  };
+
+  // Handle Clara-Core Reconfigure (removes container and starts wizard)
+  const handleClaraCoreReconfigure = async () => {
+    const confirmed = window.confirm(
+      'Reconfiguring Clara-Core will:\n\n' +
+      '1. Stop and remove the existing container\n' +
+      '2. Launch the setup wizard\n' +
+      '3. Allow you to choose a different architecture\n\n' +
+      'Your models will NOT be deleted.\n\n' +
+      'Continue?'
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setClaraCoreLoading(true);
+
+      // Remove existing container
+      const response = await fetch(`${env.serverUrl}/api/server/clara-core/remove?force=true`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        // Refresh status
+        await fetchClaraCoreStatus();
+        await fetchClaraCoreDockerStatus();
+
+        // Open wizard
+        setShowClaraCoreWizard(true);
+      } else {
+        throw new Error(result.error || 'Failed to remove container');
+      }
+    } catch (error) {
+      console.error('Failed to reconfigure Clara-Core:', error);
+      alert(`Failed to reconfigure: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setClaraCoreLoading(false);
+    }
+  };
+
+  // Start Clara-Core (server API based on docker mode)
+  const handleClaraCoreStart = async () => {
+    setClaraCoreLoading(true);
+    try {
+      const mode = serviceConfigs.claracore?.mode || 'local';
+
+      if (mode === 'docker') {
+        // Use server API for Docker mode
+        const response = await fetch(`${env.serverUrl}/api/server/clara-core/start`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+          setTimeout(() => fetchClaraCoreStatus(), 2000);
+          setTimeout(() => fetchClaraCoreDockerStatus(), 3000);
+        } else {
+          throw new Error(result.error || 'Failed to start container');
+        }
+      } else {
+        // Use electron IPC for local mode
+        await handleClaraCoreAction('start');
+      }
+    } catch (error) {
+      console.error('Failed to start Clara-Core:', error);
+      alert(`Failed to start: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setClaraCoreLoading(false);
+    }
+  };
+
+  // Stop Clara-Core (server API based on docker mode)
+  const handleClaraCoreStop = async () => {
+    setClaraCoreLoading(true);
+    try {
+      const mode = serviceConfigs.claracore?.mode || 'local';
+
+      if (mode === 'docker') {
+        // Use server API for Docker mode
+        const response = await fetch(`${env.serverUrl}/api/server/clara-core/stop`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+          setTimeout(() => fetchClaraCoreStatus(), 2000);
+          setTimeout(() => fetchClaraCoreDockerStatus(), 3000);
+        } else {
+          throw new Error(result.error || 'Failed to stop container');
+        }
+      } else {
+        // Use electron IPC for local mode
+        await handleClaraCoreAction('stop');
+      }
+    } catch (error) {
+      console.error('Failed to stop Clara-Core:', error);
+      alert(`Failed to stop: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setClaraCoreLoading(false);
+    }
+  };
+
+  // Restart Clara-Core (server API based on docker mode)
+  const handleClaraCoreRestart = async () => {
+    setClaraCoreLoading(true);
+    try {
+      const mode = serviceConfigs.claracore?.mode || 'local';
+
+      if (mode === 'docker') {
+        // Use server API for Docker mode
+        const response = await fetch(`${env.serverUrl}/api/server/clara-core/restart`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+          setTimeout(() => fetchClaraCoreStatus(), 2000);
+          setTimeout(() => fetchClaraCoreDockerStatus(), 5000);
+        } else {
+          throw new Error(result.error || 'Failed to restart container');
+        }
+      } else {
+        // Use electron IPC for local mode
+        await handleClaraCoreAction('restart');
+      }
+    } catch (error) {
+      console.error('Failed to restart Clara-Core:', error);
+      alert(`Failed to restart: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setClaraCoreLoading(false);
     }
   };
 
@@ -1420,12 +1622,12 @@ const UnifiedServiceManager: React.FC = () => {
                 onClick={() => {
                   // Pre-populate with default URL if none exists
                   const defaultUrl = service.id === 'claracore'
-                    ? 'http://localhost:8091'
+                    ? env.claraCoreUrl
                     : service.id === 'comfyui'
-                      ? 'http://localhost:8188'
+                      ? env.comfyuiUrl
                       : service.id === 'python-backend'
-                        ? 'http://localhost:5001'
-                        : 'http://localhost:5678';
+                        ? env.pythonBackendUrl
+                        : env.n8nUrl;
 
                   const urlToUse = config.url || defaultUrl;
 
@@ -1695,12 +1897,12 @@ const UnifiedServiceManager: React.FC = () => {
                     }}
                     className="flex-1 px-3 py-2 rounded-lg bg-white/50 border border-gray-200 focus:outline-none focus:border-purple-300 dark:bg-gray-800/50 dark:border-gray-700 dark:text-gray-100"
                     placeholder={service.id === 'claracore'
-                      ? 'http://localhost:8091'
+                      ? env.claraCoreUrl
                       : service.id === 'comfyui'
-                        ? 'http://localhost:8188'
+                        ? env.comfyuiUrl
                         : service.id === 'python-backend'
-                          ? 'http://localhost:5001'
-                          : 'http://localhost:5678'
+                          ? env.pythonBackendUrl
+                          : env.n8nUrl
                     }
                   />
                   
@@ -1876,7 +2078,7 @@ const UnifiedServiceManager: React.FC = () => {
                       {service.actions.includes('start') && !isRunning && (
                         <button
                           onClick={() => {
-                            if (service.id === 'claracore') handleClaraCoreAction('start');
+                            if (service.id === 'claracore') handleClaraCoreStart();
                             else if (service.id === 'n8n') handleN8nAction('start');
                             else if (service.id === 'comfyui') handleComfyuiAction('start');
                             else if (service.id === 'python-backend') handlePythonBackendAction('start');
@@ -1891,7 +2093,7 @@ const UnifiedServiceManager: React.FC = () => {
                       {service.actions.includes('stop') && isRunning && (
                         <button
                           onClick={() => {
-                            if (service.id === 'claracore') handleClaraCoreAction('stop');
+                            if (service.id === 'claracore') handleClaraCoreStop();
                             else if (service.id === 'n8n') handleN8nAction('stop');
                             else if (service.id === 'comfyui') handleComfyuiAction('stop');
                             else if (service.id === 'python-backend') handlePythonBackendAction('stop');
@@ -1906,7 +2108,7 @@ const UnifiedServiceManager: React.FC = () => {
                       {service.actions.includes('restart') && (
                         <button
                           onClick={() => {
-                            if (service.id === 'claracore') handleClaraCoreAction('restart');
+                            if (service.id === 'claracore') handleClaraCoreRestart();
                             else if (service.id === 'n8n') handleN8nAction('restart');
                             else if (service.id === 'comfyui') handleComfyuiAction('restart');
                             else if (service.id === 'python-backend') handlePythonBackendAction('restart');
@@ -1920,9 +2122,50 @@ const UnifiedServiceManager: React.FC = () => {
                       )}
                     </>
                   )}
+
+                  {/* Clara-Core Specific Actions */}
+                  {service.id === 'claracore' && config.mode === 'docker' && (
+                    <>
+                      {/* Setup Button - Show if Docker mode but no container exists */}
+                      {!claraCoreDockerStatus?.exists && (
+                        <button
+                          onClick={() => setShowClaraCoreWizard(true)}
+                          disabled={service.isLoading}
+                          className="px-3 py-1 bg-gradient-to-r from-purple-500 to-pink-600 text-white rounded text-sm hover:from-purple-600 hover:to-pink-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-1 font-medium shadow-md"
+                        >
+                          <Settings className="w-3 h-3" />
+                          Setup
+                        </button>
+                      )}
+
+                      {/* Reconfigure Button - Show if container exists */}
+                      {claraCoreDockerStatus?.exists && (
+                        <button
+                          onClick={handleClaraCoreReconfigure}
+                          disabled={service.isLoading}
+                          className="px-3 py-1 bg-purple-500 text-white rounded text-sm hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
+                        >
+                          <Settings className="w-3 h-3" />
+                          Reconfigure
+                        </button>
+                      )}
+
+                      {/* View Logs Button - Show if container exists */}
+                      {claraCoreDockerStatus?.exists && (
+                        <button
+                          onClick={() => setShowClaraCoreLogs(true)}
+                          disabled={service.isLoading}
+                          className="px-3 py-1 bg-gray-500 text-white rounded text-sm hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
+                        >
+                          <FileText className="w-3 h-3" />
+                          Logs
+                        </button>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
-              
+
               {/* Configuration Details */}
               <div className="grid grid-cols-2 gap-4 text-xs">
                 <div>
@@ -1940,7 +2183,13 @@ const UnifiedServiceManager: React.FC = () => {
                 <div>
                   <span className="text-gray-500 dark:text-gray-400">Service Type:</span>
                   <span className="ml-1 text-gray-700 dark:text-gray-300 font-medium">
-                    {service.id === 'comfyui' ? 'Image Generation' : service.id === 'python-backend' ? 'AI Processing' : 'Workflow Automation'}
+                    {service.id === 'claracore'
+                      ? 'Local LLM Inference'
+                      : service.id === 'comfyui'
+                        ? 'Image Generation'
+                        : service.id === 'python-backend'
+                          ? 'AI Processing'
+                          : 'Workflow Automation'}
                   </span>
                 </div>
                 <div>
@@ -1954,6 +2203,38 @@ const UnifiedServiceManager: React.FC = () => {
                   <span className="ml-1 text-green-700 dark:text-green-300 font-medium">Yes</span>
                 </div>
               </div>
+
+              {/* Clara-Core Architecture Info */}
+              {service.id === 'claracore' && config.mode === 'docker' && claraCoreDockerStatus?.architecture && (
+                <div className="mt-3 p-3 bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 border border-purple-200 dark:border-purple-700 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    {claraCoreDockerStatus.architecture === 'cuda' ? (
+                      <Gpu className="w-5 h-5 text-green-600 dark:text-green-400" />
+                    ) : claraCoreDockerStatus.architecture === 'rocm' ? (
+                      <Gpu className="w-5 h-5 text-red-600 dark:text-red-400" />
+                    ) : (
+                      <Cpu className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                    )}
+                    <div className="flex-1">
+                      <div className="text-sm font-semibold text-gray-900 dark:text-white">
+                        Architecture: {claraCoreDockerStatus.architecture.toUpperCase()}
+                      </div>
+                      <div className="text-xs text-gray-600 dark:text-gray-400 mt-0.5">
+                        {claraCoreDockerStatus.architecture === 'cuda' && 'NVIDIA GPU acceleration enabled'}
+                        {claraCoreDockerStatus.architecture === 'rocm' && 'AMD GPU acceleration enabled'}
+                        {claraCoreDockerStatus.architecture === 'strix' && 'AMD Ryzen AI acceleration enabled'}
+                        {claraCoreDockerStatus.architecture === 'cpu' && 'CPU-only inference'}
+                      </div>
+                    </div>
+                    {claraCoreDockerStatus.healthy && (
+                      <div className="flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
+                        <Check className="w-4 h-4" />
+                        Healthy
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Error Display */}
               {service.error && (
@@ -2170,6 +2451,23 @@ const UnifiedServiceManager: React.FC = () => {
             .map(renderConfigurableServiceCard)}
         </div>
       </div>
+
+      {/* Clara-Core Setup Wizard Modal */}
+      {showClaraCoreWizard && (
+        <ClaraCoreSetupWizard
+          onComplete={handleClaraCoreSetupComplete}
+          onCancel={() => setShowClaraCoreWizard(false)}
+          onSkip={() => setShowClaraCoreWizard(false)}
+        />
+      )}
+
+      {/* Clara-Core Logs Viewer Modal */}
+      {showClaraCoreLogs && (
+        <ClaraCoreLogsViewer
+          isOpen={showClaraCoreLogs}
+          onClose={() => setShowClaraCoreLogs(false)}
+        />
+      )}
     </div>
   );
 };
